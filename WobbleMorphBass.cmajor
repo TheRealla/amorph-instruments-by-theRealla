@@ -1,0 +1,125 @@
+processor WobbleMorphBass
+{
+    input event midi::Message midiIn;
+    output stream float audioOut[2];
+
+    [[parameter, name: "Wobble Rate", min: 0.1, max: 20.0, default: 4.0]]
+    float wobbleRate = 4.0f;
+
+    [[parameter, name: "Morph Amount", min: 0.0, max: 1.0, default: 0.5]]
+    float morphAmount = 0.5f;
+
+    [[parameter, name: "Distortion Drive", min: 0.0, max: 10.0, default: 3.0]]
+    float distortionDrive = 3.0f;
+
+    [[parameter, name: "Attack", min: 0.001, max: 1.0, default: 0.01]]
+    float attackTime = 0.01f;
+
+    [[parameter, name: "Release", min: 0.01, max: 5.0, default: 0.5]]
+    float releaseTime = 0.5f;
+
+    struct Voice
+    {
+        float phase = 0.0f;
+        float lfoPhase = 0.0f;
+        float modPhase = 0.0f;
+        float frequency = 0.0f;
+        float velocity = 1.0f;
+        bool active = false;
+        float envLevel = 0.0f;
+    };
+
+    Voice[8] voices;
+
+    event midiIn (midi::Message m)
+    {
+        if (m.isNoteOn())
+        {
+            let note = m.noteNumber;
+            let vel = m.velocity / 127.0f;
+            for (auto& v : voices)
+            {
+                if (!v.active)
+                {
+                    v.active = true;
+                    v.frequency = midiToFreq(note);
+                    v.phase = 0.0f;
+                    v.lfoPhase = 0.0f;
+                    v.modPhase = 0.0f;
+                    v.velocity = vel;
+                    v.envLevel = 0.0f;
+                    return;
+                }
+            }
+        }
+        else if (m.isNoteOff())
+        {
+            let note = m.noteNumber;
+            for (auto& v : voices)
+            {
+                if (v.active && abs(v.frequency - midiToFreq(note)) < 1.0f)
+                {
+                    v.active = false;
+                    return;
+                }
+            }
+        }
+    }
+
+    float midiToFreq(int note)
+    {
+        return 440.0f * pow(2.0f, float(note - 69) / 12.0f);
+    }
+
+    void main()
+    {
+        loop
+        {
+            float sum = 0.0f;
+            for (int i = 0; i < 8; ++i)
+            {
+                auto& v = voices[i];
+                if (v.active || v.envLevel > 0.0f)
+                {
+                    // Envelope
+                    if (v.active)
+                        v.envLevel = min(1.0f, v.envLevel + (processor.sampleRate * processor.period) / attackTime);
+                    else
+                        v.envLevel = max(0.0f, v.envLevel - (processor.sampleRate * processor.period) / releaseTime);
+
+                    // LFO wobble (simulates filter cutoff modulation on freq)
+                    let lfo = sin(v.lfoPhase);
+                    v.lfoPhase += wobbleRate * processor.period * 6.283185f;
+
+                    // FM modulator for metallic grit
+                    let fmMod = sin(v.modPhase) * morphAmount * 8.0f;
+                    v.modPhase += v.frequency * 2.0f * processor.period;
+
+                    // Base sine + wobble
+                    let carrier = sin(v.phase + lfo * 0.02f * v.frequency);
+
+                    // FM version
+                    let fm = sin(v.phase + fmMod);
+
+                    // Morph between pure sine and gritty FM (stronger on higher notes via knob)
+                    let osc = carrier * (1.0f - morphAmount) + fm * morphAmount;
+
+                    // Distortion
+                    let distorted = tanh(osc * distortionDrive);
+
+                    // Velocity + envelope amp
+                    let sample = distorted * v.velocity * v.envLevel * 0.3f;
+
+                    sum += sample;
+
+                    // Phase advance
+                    v.phase += v.frequency * processor.period;
+                }
+            }
+
+            audioOut[0] <- sum;
+            audioOut[1] <- sum;
+            advance();
+        }
+    }
+}
